@@ -1,0 +1,143 @@
+From 7b7ef43adc993886e20fe04d611776ac23d015e8 Mon Sep 17 00:00:00 2001
+From: Luca Barbato <lu_zero@gentoo.org>
+Date: Tue, 27 Dec 2022 10:05:15 +0100
+Subject: [PATCH 1/4] Try to find extroot configuration on already mounted
+ overlay
+
+Signed-off-by: Luca Barbato <lu_zero@gentoo.org>
+---
+ block.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/block.c b/block.c
+index 4b45200..28eac59 100644
+--- a/block.c
++++ b/block.c
+@@ -1646,6 +1646,11 @@ static int main_extroot(int argc, char **argv)
+ 	/* enable LOG_INFO messages */
+ 	ulog_threshold(LOG_INFO);
+ 
++	/* try the currently mounted overlay if exists */
++	err = mount_extroot("/tmp/overlay");
++	if (!err)
++	    return err;
++
+ 	/*
+ 	 * Look for "rootfs_data". We will want to mount it and check for
+ 	 * extroot configuration.
+
+From d1341ed4b020d63a0460c7cc2b99f721898b1aba Mon Sep 17 00:00:00 2001
+From: Luca Barbato <lu_zero@gentoo.org>
+Date: Tue, 3 Jan 2023 12:06:58 +0100
+Subject: [PATCH 2/4] Try to find the root device on both / and /rom
+
+Sometimes / is already overlay mounted, assume /rom contains the real
+rootfs.
+
+Signed-off-by: Luca Barbato <lu_zero@gentoo.org>
+---
+ block.c | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/block.c b/block.c
+index 28eac59..7b2ea8f 100644
+--- a/block.c
++++ b/block.c
+@@ -1397,14 +1397,14 @@ static int find_block_ubi_RO(libubi_t libubi, char *name, char *part, int plen)
+ }
+ #endif
+ 
+-static int find_root_dev(char *buf, int len)
++static int find_dev(const char *path, char *buf, int len)
+ {
+ 	DIR *d;
+ 	dev_t root;
+ 	struct stat s;
+ 	struct dirent *e;
+ 
+-	if (stat("/", &s))
++	if (stat(path, &s))
+ 		return -1;
+ 
+ 	if (!(d = opendir("/dev")))
+@@ -1426,6 +1426,15 @@ static int find_root_dev(char *buf, int len)
+ 	return -1;
+ }
+ 
++static int find_root_dev(char *buf, int len)
++{
++	int err = find_dev("/", buf, len);
++	if (err)
++	    err = find_dev("/rom", buf, len);
++
++	return err;
++}
++
+ static int test_fs_support(const char *name)
+ {
+ 	char line[128], *p;
+
+From 50a5f4229fef098d458fe4f3354671a026d7d838 Mon Sep 17 00:00:00 2001
+From: Daniel Golle <daniel@makrotopia.org>
+Date: Tue, 3 Jan 2023 13:07:15 +0100
+Subject: [PATCH 3/4] First look for the currently mounted root device
+
+And then fallback to looking for rootfs.
+
+Signed-off-by: Luca Barbato <lu_zero@gentoo.org>
+---
+ block.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/block.c b/block.c
+index 7b2ea8f..038a083 100644
+--- a/block.c
++++ b/block.c
+@@ -1479,7 +1479,10 @@ static int check_extroot(char *path)
+ 	FILE *fp;
+ 	int err;
+ 
+-	err = find_block_mtd("\"rootfs\"", devpath, sizeof(devpath));
++	err = find_root_dev(devpath, sizeof(devpath));
++	if (err) {
++		err = find_block_mtd("\"rootfs\"", devpath, sizeof(devpath));
++	}
+ #ifdef UBIFS_EXTROOT
+ 	if (err) {
+ 		libubi_t libubi;
+@@ -1489,9 +1492,6 @@ static int check_extroot(char *path)
+ 		libubi_close(libubi);
+ 	}
+ #endif
+-	if (err) {
+-		err = find_root_dev(devpath, sizeof(devpath));
+-	}
+ 	if (err) {
+ 		ULOG_ERR("extroot: unable to determine root device\n");
+ 		return -1;
+
+From 25880d633afbc11bd057df39344bde525a906f02 Mon Sep 17 00:00:00 2001
+From: Luca Barbato <lu_zero@gentoo.org>
+Date: Sat, 4 Mar 2023 11:46:33 +0100
+Subject: [PATCH 4/4] Add a mean to avoid the uuid check
+
+Signed-off-by: Luca Barbato <lu_zero@gentoo.org>
+---
+ block.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/block.c b/block.c
+index 038a083..4efa8bc 100644
+--- a/block.c
++++ b/block.c
+@@ -1479,6 +1479,10 @@ static int check_extroot(char *path)
+ 	FILE *fp;
+ 	int err;
+ 
++	snprintf(tag, sizeof(tag), "%s/etc/.extroot-default", path);
++	if (stat(tag, &s))
++		return 0;
++
+ 	err = find_root_dev(devpath, sizeof(devpath));
+ 	if (err) {
+ 		err = find_block_mtd("\"rootfs\"", devpath, sizeof(devpath));
